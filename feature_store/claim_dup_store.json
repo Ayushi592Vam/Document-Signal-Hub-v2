@@ -1,0 +1,170 @@
+{
+  "GL-2458591": {
+    "claim_id": "GL-2458591",
+    "sheet_name": "GL - General Liability",
+    "filename": "TPA_13_Continental_MultiLOB.xlsx",
+    "ingested_at": "2026-04-10T21:07:08.112629",
+    "fields": {
+      "Claim Number": "GL-2458591",
+      "Policy #": "TREATY-133326",
+      "Insured Name": "Robert Miller",
+      "Loss Date": "01/24/2024",
+      "Date Reported": "02/12/2024",
+      "Status": "Closed",
+      "Line of Business": "GL - General Liability",
+      "Indemnity Paid": "126221.47",
+      "Expense Paid": "7407.13",
+      "Indemnity Reserve": "80721.67",
+      "Expense Reserve": "59512.75",
+      "Total Incurred": "273863.02",
+      "Cause of Loss": "Workers comp - hand injury from industrial machinery"
+    }
+  },
+  "GL-8536477": {
+    "claim_id": "GL-8536477",
+    "sheet_name": "GL - General Liability",
+    "filename": "TPA_13_Continental_MultiLOB.xlsx",
+    "ingested_at": "2026-04-10T21:07:08.112679",
+    "fields": {
+      "Claim Number": "GL-8536477",
+      "Policy #": "RE-POL-948749",
+      "Insured Name": "Robert Miller",
+      "Loss Date": "09/20/2024",
+      "Date Reported": "09/23/2024",
+      "Status": "Closed",
+      "Line of Business": "GL - General Liability",
+      "Indemnity Paid": "282816.31",
+      "Expense Paid": "35942.97",
+      "Indemnity Reserve": "493914.23",
+      "Expense Reserve": "34142.07",
+      "Total Incurred": "846815.58",
+      "Cause of Loss": "Lightning strike; electrical systems replacement"
+    }
+  },
+  "GL-7022674": {
+    "claim_id": "GL-7022674",
+    "sheet_name": "GL - General Liability",
+    "filename": "TPA_13_Continental_MultiLOB.xlsx",
+    "ingested_at": "2026-04-10T21:07:08.112770",
+    "fields": {
+      "Claim Number": "GL-7022674",
+      "Policy #": "RE-POL-733052",
+      "Insured Name": "James Chen",
+      "Loss Date": "06/09/2025",
+      "Date Reported": "06/20/2025",
+      "Status": "Open",
+      "Line of Business": "GL - General Liability",
+      "Indemnity Paid": "111580.31",
+      "Expense Paid": "38292.96",
+      "Indemnity Reserve": "80525.09",
+      "Expense Reserve": "31014.26",
+      "Total Incurred": "261412.62",
+      "Cause of Loss": "Lightning strike; electrical systems replacement"
+    }
+  },
+  "GL-7067228": {
+    "claim_id": "GL-7067228",
+    "sheet_name": "GL - General Liability",
+    "filename": "TPA_13_Continental_MultiLOB.xlsx",
+    "ingested_at": "2026-04-10T21:07:08.112804",
+    "fields": {
+      "Claim Number": "GL-7067228",
+      "Policy #": "MR-FAC-838797",
+      "Insured Name": "David Wagner",
+      "Loss Date": "09/04/2025",
+      "Date Reported": "09/30/2025",
+      "Status": "Open",
+      "Line of Business": "GL - General Liability",
+      "Indemnity Paid": "44006.10",
+      "Expense Paid": "15012.32",
+      "Indemnity Reserve": "443761.46",
+      "Expense Reserve": "70950.69",
+      "Total Incurred": "573730.57",
+      "Cause of Loss": "Employee back injury from lifting; 4 months lost time"
+    }
+  },
+  "GL-3728882": {
+    "claim_id": "GL-3728882",
+    "sheet_name": "GL - General Liability",
+    "filename": "TPA_13_Continental_MultiLOB.xlsx",
+    "ingested_at": "2026-04-10T21:07:08.112832",
+    "fields": {
+      "Claim Number": "GL-3728882",
+      "Policy #": "RE-POL-472528",
+      "Insured Name": "Richard White",
+      "Loss Date": "05/03/2024",
+      "Date Reported": "05/19/2024",
+      "Status": "Reopened",
+      "Line of Business": "GL - General Liability",
+      "Indemnity Paid": "433909.42",
+      "Expense Paid": "19316.25",
+      "Indemnity Reserve": "322853.11",
+      "Expense Reserve": "66894.72",
+      "Total Incurred": "842973.50",
+      "Cause of Loss": "Lightning strike; electrical systems replacement"
+    }
+  },
+  "GL-4684531": {
+    "claim_id": "GL-4684531",
+    "sheet_name": "GL - General Liability",
+    "filename": "TPA_13_Continental_MultiLOB.xlsx",
+    "ingested_at": "2026-04-10T21:07:08.112857",
+    "fields": {
+      "Claim Number": "GL-4684531",
+      "Policy #": "RE-POL-983794",
+      "Insured Name": "Karen Schmidt",
+      "Loss Date": "10/21/2024",
+      "Date Reported": "11/02/2024",
+      "Status": "Closed",
+      "Line of Business": "GL - General Liability",
+      "Indemnity Paid": "269399.24",
+      "Expense Paid": "12618.14",
+      "Indemnity Reserve": "328959.55",
+      "Expense Reserve": "22325.88",
+      "Total Incurred": "633302.81",
+      "Cause of Loss": "Construction defect claim; foundation settlement"
+    }
+  },
+  "GL-4567281": {
+    "claim_id": "GL-4567281",
+    "sheet_name": "GL - General Liability",
+    "filename": "TPA_13_Continental_MultiLOB.xlsx",
+    "ingested_at": "2026-04-10T21:07:08.112881",
+    "fields": {
+      "Claim Number": "GL-4567281",
+      "Policy #": "TREATY-514850",
+      "Insured Name": "John Taylor",
+      "Loss Date": "06/13/2024",
+      "Date Reported": "07/02/2024",
+      "Status": "Closed",
+      "Line of Business": "GL - General Liability",
+      "Indemnity Paid": "37763.36",
+      "Expense Paid": "45700.24",
+      "Indemnity Reserve": "401354.24",
+      "Expense Reserve": "57715.23",
+      "Total Incurred": "542533.07",
+      "Cause of Loss": "Professional negligence; failure to detect structural defect"
+    }
+  },
+  "GL-7073292": {
+    "claim_id": "GL-7073292",
+    "sheet_name": "GL - General Liability",
+    "filename": "TPA_13_Continental_MultiLOB.xlsx",
+    "ingested_at": "2026-04-10T21:07:08.112907",
+    "fields": {
+      "Claim Number": "GL-7073292",
+      "Policy #": "MR-FAC-245051",
+      "Insured Name": "William Davis",
+      "Loss Date": "04/24/2024",
+      "Date Reported": "05/31/2024",
+      "Status": "Open",
+      "Line of Business": "GL - General Liability",
+      "Indemnity Paid": "271793.76",
+      "Expense Paid": "37477.18",
+      "Indemnity Reserve": "305619.34",
+      "Expense Reserve": "47099.10",
+      "Total Incurred": "661989.38",
+      "Cause of Loss": "Water damage from burst pipe; inventory and equipment loss"
+    }
+  }
+}

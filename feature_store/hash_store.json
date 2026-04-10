@@ -1,0 +1,13 @@
+{
+  "dedebe994d9365dc55c616a3e96c55f763a069996ccb201c1e5e32cf501011b3": {
+    "filename": "TPA_13_Continental_MultiLOB.xlsx",
+    "first_seen": "2026-04-10T21:07:07.443447",
+    "sheet_hashes": {
+      "GL - General Liability": "da9db1bce91b9aebac95fbf775c12bedfc8834d0595dd8f2936d61549bb5e6e4",
+      "Property": "73645c3097e57a50a72a8f5f389c681805bd66146cec053935eb23239073fd55",
+      "Workers Comp": "508121c7302259ec8fefb7855e421aaa3a032900f98f60d0bf948b68bdbd9a0e",
+      "Auto Liability": "b4a3db892e294d89217ddaff519357d9da25af5389e1883121299d12d4d51d1d",
+      "Professional Liability": "889ac4d838ca3eba6feef83a016cd383cc39264e9dbc016d9f926e1f56280d5a"
+    }
+  }
+}
