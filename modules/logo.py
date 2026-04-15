@@ -8,36 +8,35 @@ import base64
 import os
 
 
-def _load_logo_b64() -> tuple[str, str]:
-    """Returns (base64_string, mime_type) or ('', '')."""
+def _load_image_b64(filename: str) -> tuple[str, str]:
+    cwd = os.getcwd()
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.abspath(os.path.join(module_dir, ".."))
+
     candidates = [
-        "valuemomentum_logo.png",
-        "valuemomentum_logo.jpg",
-        "valuemomentum_logo.jpeg",
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "valuemomentum_logo.png"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "valuemomentum_logo.jpg"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "valuemomentum_logo.jpeg"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "valuemomentum_logo.png"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "valuemomentum_logo.jpg"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "valuemomentum_logo.jpeg"),
+        os.path.join(cwd, filename),
+        os.path.join(cwd, "assets", filename),
+        os.path.join(root, filename),
+        os.path.join(root, "assets", filename),
     ]
     for path in candidates:
         if os.path.exists(path):
-            ext  = os.path.splitext(path)[1].lower()
+            ext = os.path.splitext(path)[1].lower()
             mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
             with open(path, "rb") as f:
                 return base64.b64encode(f.read()).decode(), mime
     return "", ""
 
 
-LOGO_B64, LOGO_MIME = _load_logo_b64()
+# Left side — Signal Hub screenshot
+LOGO_B64, LOGO_MIME = _load_image_b64("Screenshot 2026-04-14 125311.png")
+
+# Right badge — ValueMomentum logo
+BADGE_LOGO_B64, BADGE_LOGO_MIME = _load_image_b64("valuemomentum_logo.jpg")
 
 
 def logo_img_tag(height: int = 52) -> str:
-    """
-    Returns a clean <img> tag — no background, no padding, no border-radius,
-    no clipping. The logo renders exactly as the source image.
-    """
+    """Left navbar logo — Signal Hub."""
     if not LOGO_B64:
         return ""
     mime = LOGO_MIME or "image/png"

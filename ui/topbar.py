@@ -1,14 +1,38 @@
-"""
-ui/topbar.py
-Renders the top navigation bar: logo, title, schema badge, settings gear, cache button.
-Returns True if the settings dialog should be opened.
-"""
+
+
 
 import streamlit as st
-from modules.logo import logo_img_tag
+from modules.logo import logo_img_tag, LOGO_B64, LOGO_MIME, BADGE_LOGO_B64, BADGE_LOGO_MIME
 
 
-def _navbar_badge_html(active_schema: str | None, schemas: dict) -> str:
+# ── Signal Hub right-side badge ───────────────────────────────────────────────
+
+def _signal_hub_badge_html() -> str:
+    """Right badge — ValueMomentum logo."""
+    if BADGE_LOGO_B64:
+        mime = BADGE_LOGO_MIME or "image/png"
+        return (
+            f'<div style="'
+            f'display:flex;align-items:center;'
+            f'background:linear-gradient(135deg,#0d0d1a 0%,#12122a 100%);'
+            f'border:1px solid #2a2a45;border-radius:10px;'
+            f'padding:6px 12px;white-space:nowrap;flex-shrink:0;">'
+            f'<img src="data:{mime};base64,{BADGE_LOGO_B64}" '
+            f'style="height:44px;width:auto;display:inline-block;'
+            f'vertical-align:middle;" />'
+            f'</div>'
+        )
+    return (
+        '<div style="display:flex;align-items:center;'
+        'background:linear-gradient(135deg,#0d0d1a 0%,#12122a 100%);'
+        'border:1px solid #2a2a45;border-radius:10px;'
+        'padding:8px 16px;white-space:nowrap;flex-shrink:0;">'
+        '<span style="font-size:20px;">🛡️</span>'
+        '</div>'
+    )
+
+
+def _schema_badge_html(active_schema: str | None, schemas: dict) -> str:
     if not active_schema or active_schema not in schemas:
         return ""
     sc = schemas[active_schema]
@@ -19,7 +43,7 @@ def _navbar_badge_html(active_schema: str | None, schemas: dict) -> str:
         f'font-size:12px;font-weight:700;font-family:monospace;'
         f'border:1px solid {sc["color"]}55;'
         f'color:{sc["color"]};background:{sc["color"]}12;'
-        f'white-space:nowrap;letter-spacing:0.3px;margin-left:20px;">'
+        f'white-space:nowrap;letter-spacing:0.3px;margin-left:16px;">'
         f'{sc["icon"]} {active_schema} &nbsp;&middot;&nbsp; {sc["version"]}</span>'
     )
 
@@ -29,35 +53,52 @@ def render_topbar(schemas: dict, config_load_status: dict) -> bool:
     Renders the top bar.
     Returns True if the settings gear was clicked (caller should open dialog).
     """
-    active_schema = st.session_state.get("active_schema", None)
-    _logo         = logo_img_tag(height=52)
-    _badge        = _navbar_badge_html(active_schema, schemas)
+    active_schema   = st.session_state.get("active_schema", None)
+    _vm_logo        = logo_img_tag(height=48)
+    _schema_badge   = _schema_badge_html(active_schema, schemas)
+    _sh_badge       = _signal_hub_badge_html()
 
+    # Layout: [title area — wide] [cache btn] [gear btn]
     col_title, col_cache, col_gear = st.columns([10, 1, 1])
 
     with col_title:
         st.markdown(
+            # ── Outer flex row: logo | title+sub | schema | flex-spacer | SH badge
             '<div style="'
             'display:flex;align-items:center;'
-            'padding:10px 0 8px 0;min-height:60px;'
+            'padding:8px 0 6px 0;min-height:60px;gap:0;'
             '">'
-            + _logo +
+
+            # VM logo — left anchor
+            + _vm_logo +
+
+            # Title + subtitle block
             '<div style="'
             'display:flex;flex-direction:column;'
-            'justify-content:center;gap:3px;'
+            'justify-content:center;gap:2px;'
+            'margin-left:4px;'
             '">'
             '<span style="'
             'font-size:17px;font-weight:700;color:#ffffff;'
             'font-family:\'Segoe UI\',\'Helvetica Neue\',Arial,sans-serif;'
             'letter-spacing:-0.3px;line-height:1.2;white-space:nowrap;'
-            '">&#128737;&nbsp; TPA Loss Run Parser</span>'
+            '">&#128737;&nbsp; Document Signal Hub</span>'
             '<span style="'
             'font-size:11px;font-weight:400;color:#8888bb;'
             'font-family:\'JetBrains Mono\',\'Cascadia Code\',\'Consolas\',monospace;'
             'letter-spacing:0.4px;white-space:nowrap;'
             '">Automated Claims Data Ingestion &amp; Multi-Schema Export Platform</span>'
             '</div>'
-            + (_badge if _badge else '') +
+
+            # Schema badge (only when a schema is active)
+            + (_schema_badge if _schema_badge else '') +
+
+            # Flex spacer — pushes the SH badge to the far right
+            '<div style="flex:1;min-width:16px;"></div>'
+
+            # Signal Hub badge — right anchor
+            + _sh_badge +
+
             '</div>',
             unsafe_allow_html=True,
         )
@@ -100,11 +141,12 @@ def render_topbar(schemas: dict, config_load_status: dict) -> bool:
         _c1, _c2, _spacer = st.columns([1, 1, 5])
         with _c1:
             if st.button("Cancel", key="cache_cancel_btn", use_container_width=True):
-                # Just hide the panel — no rerun so the current UI stays intact
                 st.session_state["_show_cache_confirm"] = False
         with _c2:
-            if st.button("Clear caches", key="cache_confirm_btn",
-                         type="primary", use_container_width=True):
+            if st.button(
+                "Clear caches", key="cache_confirm_btn",
+                type="primary", use_container_width=True,
+            ):
                 from modules.cache_manager import (
                     clear_parsed_cache, clear_hash_store, clear_claim_dup_store,
                 )
@@ -112,19 +154,16 @@ def render_topbar(schemas: dict, config_load_status: dict) -> bool:
                 clear_hash_store()
                 clear_claim_dup_store()
 
-                # Reset duplicate flags — file and sheets are now treated as NEW
                 st.session_state["is_duplicate_file"]    = False
                 st.session_state["duplicate_first_seen"] = None
                 st.session_state["duplicate_orig_name"]  = None
                 st.session_state["sheet_dup_info"]       = {
                     sn: None for sn in st.session_state.get("sheet_names", [])
                 }
-                # Also reset the file hash so next upload re-registers as new
                 st.session_state["current_file_hash"]    = ""
                 st.session_state["last_uploaded"]        = None
                 st.session_state["_show_cache_confirm"]  = False
 
-                # Clear all claim/edit/mod state but keep file upload + prefs
                 keys_to_keep = {
                     "tmpdir", "sheet_names", "sheet_cache",
                     "selected_idx", "focus_field",
@@ -136,10 +175,13 @@ def render_topbar(schemas: dict, config_load_status: dict) -> bool:
                     "duplicate_orig_name", "sheet_dup_info",
                     "current_file_hash", "last_uploaded",
                 }
-                for k in [key for key in list(st.session_state.keys())
-                          if key not in keys_to_keep
-                          and not key.startswith("custom_fields_")]:
+                for k in [
+                    key for key in list(st.session_state.keys())
+                    if key not in keys_to_keep
+                    and not key.startswith("custom_fields_")
+                ]:
                     del st.session_state[k]
+
                 st.toast("✅ Cache cleared — file will appear as new on next upload", icon="🗑")
                 st.rerun()
 

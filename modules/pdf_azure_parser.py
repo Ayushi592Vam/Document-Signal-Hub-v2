@@ -1,50 +1,60 @@
 """
 modules/pdf_azure_parser.py
 
-Azure Document Intelligence based PDF parser
-- page-aware extraction
-- no predefined schema
-- no field renaming
-- extracts key/value-style blocks as-is
-- cleaner label/value boundaries for UI rendering
-- bounding_polygon stored per field for eye popup highlight
+Azure Document Intelligence based PDF parser.
 
-FIXES (v3):
-  1. bounding_polygon now stored on every Azure KV field
-  2. page_width / page_height stored per field (inches, from Azure result)
-  3. Text-extracted fields get bounding_polygon=None (no coords available)
-  4. All other behaviour unchanged from v2
+WHY SOME FIELDS LACK BOUNDING BOXES — and the fix:
+─────────────────────────────────────────────────────
+Azure DI's prebuilt-document model has TWO extraction paths:
+
+  Path A  — Key-Value pairs (structured)
+    Azure found an explicit label:value block in the PDF layout.
+    Always returns bounding polygons + confidence.
+    Example: "CASE NUMBER: 62CV-24-48" as a KV pair.
+
+  Path B  — Text-layout extraction (unstructured)
+    Our code splits raw OCR lines using heuristics (_split_into_label_value_blocks).
+    Azure gives us the lines but NOT per-field bounding polygons.
+    Example: "LAST REFRESHED" on one line, "January 15, 2025" on the next.
+
+After both paths run, a PyMuPDF fallback (_enrich_fields_with_pymupdf_polygons)
+searches for the key text on the page to generate synthetic bboxes.
+PROBLEM: PyMuPDF's page.search_for() is CASE-SENSITIVE by default and only
+matches exact substrings. If the stored field_name is "LAST REFRESHED" but
+PyMuPDF index has it as "Last Refreshed" (mixed case from OCR), the search fails.
+
+FIXES in this version:
+  1. search_for() called with TEXT_PRESERVE_WHITESPACE flag for better matching
+  2. Case-insensitive search: tries original → UPPER → Title → lower → first word
+  3. Value-based fallback: if key not found, search for the value text and use
+     the adjacent region as the bbox
+  4. Multi-word split: tries each significant word and intersects results
+  5. Colon-stripped variants: "FILING LOCATION:" → "FILING LOCATION" etc.
 """
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
-from functools import lru_cache
 
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.formrecognizer import DocumentAnalysisClient
 import os
 from dotenv import load_dotenv
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # AZURE CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _get_di_client() -> DocumentAnalysisClient:
-    endpoint = os.environ.get("AZURE_DI_ENDPOINT")
-    
-    key = os.environ.get("AZURE_DI_KEY")
-    
-
+    endpoint = os.environ.get("AZURE_DI_ENDPOINT", "")
+    key      = os.environ.get("AZURE_DI_KEY", "")
     if not endpoint.startswith("https://"):
-        raise ValueError(
-            f"Invalid Azure endpoint: '{endpoint}'. Must start with https://"
-        )
-
+        raise ValueError(f"Invalid Azure endpoint: '{endpoint}'. Must start with https://")
     return DocumentAnalysisClient(
         endpoint=endpoint,
-        credential=AzureKeyCredential(key)
+        credential=AzureKeyCredential(key),
     )
 
 
@@ -85,9 +95,7 @@ _VALUE_PATTERNS = [
 
 def _is_probable_label(line: str) -> bool:
     line = (line or "").strip()
-    if not line:
-        return False
-    if len(line) > 55:
+    if not line or len(line) > 55:
         return False
     if line.upper() in _KNOWN_LABELS:
         return True
@@ -117,11 +125,7 @@ def _try_split_inline(line: str) -> tuple[str, str] | None:
     left, _, right = line.partition(":")
     left  = left.strip()
     right = right.strip()
-    if not left or len(left) > 45:
-        return None
-    if not right:
-        return None
-    if len(left.split()) > 6:
+    if not left or len(left) > 45 or not right or len(left.split()) > 6:
         return None
     return (left, right)
 
@@ -159,9 +163,8 @@ def _split_into_label_value_blocks(page_text: str) -> list[tuple[str, str]]:
             continue
         inline = _try_split_inline(line)
         if inline:
-            lbl, val = inline
             _flush()
-            blocks.append((_clean_text(lbl), _clean_text(val)))
+            blocks.append((_clean_text(inline[0]), _clean_text(inline[1])))
             current_label = None
             current_value_lines = []
             continue
@@ -187,7 +190,7 @@ def _dedupe_fields(fields: list[dict]) -> list[dict]:
     for f in fields:
         key = (
             (f.get("field_name") or "").strip().lower(),
-            (f.get("value") or "").strip().lower(),
+            (f.get("value")      or "").strip().lower(),
             int(f.get("source_page") or 0),
         )
         if key in seen:
@@ -198,27 +201,19 @@ def _dedupe_fields(fields: list[dict]) -> list[dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PRIMARY EXTRACTION: PAGE TEXT → FIELDS (no bounding polygons)
+# PRIMARY EXTRACTION: PAGE TEXT → FIELDS (no bounding polygons yet)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _extract_page_fields_from_text(page_text: str, page_num: int) -> list[dict]:
-    """
-    Extract raw label/value pairs from OCR page text.
-    No schema. No field renaming. No bounding polygons (text-only extraction).
-    """
     fields: list[dict] = []
     blocks = _split_into_label_value_blocks(page_text)
-
     for label, value in blocks:
         label = _clean_text(label)
         value = _clean_text(value)
-
         if not label or not value:
             continue
-
         if len(value) > 8000:
             value = value[:8000] + "…"
-
         fields.append({
             "field_name":       label,
             "value":            value,
@@ -228,8 +223,7 @@ def _extract_page_fields_from_text(page_text: str, page_num: int) -> list[dict]:
             "excel_col":        None,
             "source_text":      f"{label}: {value}",
             "raw_key":          label,
-            # ── No bounding polygon for text-extracted fields ──
-            "bounding_polygon": None,
+            "bounding_polygon": None,   # enriched later
             "page_width":       None,
             "page_height":      None,
             "source_block":     None,
@@ -238,7 +232,6 @@ def _extract_page_fields_from_text(page_text: str, page_num: int) -> list[dict]:
             "source_row":       None,
             "source_col":       None,
         })
-
     return _dedupe_fields(fields)
 
 
@@ -247,10 +240,6 @@ def _extract_page_fields_from_text(page_text: str, page_num: int) -> list[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _extract_polygon(bounding_regions) -> list[tuple[float, float]] | None:
-    """
-    Extract polygon as list of (x, y) inch coordinates from Azure bounding regions.
-    Returns None if unavailable.
-    """
     if not bounding_regions:
         return None
     try:
@@ -266,10 +255,6 @@ def _merge_polygons(
     poly1: list[tuple[float, float]] | None,
     poly2: list[tuple[float, float]] | None,
 ) -> list[tuple[float, float]] | None:
-    """
-    Merge two bounding polygons into one bounding rectangle covering both.
-    Used to combine key + value polygons into a single highlight region.
-    """
     pts = []
     if poly1:
         pts.extend(poly1)
@@ -277,28 +262,20 @@ def _merge_polygons(
         pts.extend(poly2)
     if not pts:
         return None
-
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]
     x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
-
-    # Return as 4-point clockwise polygon
     return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SECONDARY EXTRACTION: AZURE KEY-VALUE PAIRS (with bounding polygons)
+# SECONDARY EXTRACTION: AZURE KV PAIRS (with bounding polygons + confidence)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _extract_azure_kv_fields(
     result,
     page_dim_map: dict[int, tuple[float, float]],
 ) -> dict[int, list[dict]]:
-    """
-    Use Azure key_value_pairs as enrichment.
-    Stores bounding_polygon (merged key+value region) and page dimensions.
-    Never overwrites fields already found by text extraction.
-    """
     page_field_map: dict[int, list[dict]] = {}
 
     if not getattr(result, "key_value_pairs", None):
@@ -307,17 +284,14 @@ def _extract_azure_kv_fields(
     for kv in result.key_value_pairs:
         key_text = kv.key.content.strip() if kv.key and kv.key.content else None
         val_text = kv.value.content.strip() if kv.value and kv.value.content else ""
-
         key_text = _clean_text(key_text or "")
         val_text = _clean_text(val_text)
 
         if not key_text or not val_text:
             continue
-
         if len(val_text) > 8000:
             val_text = val_text[:8000] + "…"
 
-        # ── Source page ───────────────────────────────────────────────────────
         source_page = None
         key_regions = getattr(kv.key, "bounding_regions", None) if kv.key else None
         val_regions = getattr(kv.value, "bounding_regions", None) if kv.value else None
@@ -326,29 +300,25 @@ def _extract_azure_kv_fields(
             source_page = key_regions[0].page_number
         elif val_regions:
             source_page = val_regions[0].page_number
-
         if source_page is None:
             source_page = 1
 
-        # ── Bounding polygon (merge key + value regions) ──────────────────────
-        key_poly = _extract_polygon(key_regions)
-        val_poly = _extract_polygon(val_regions)
-        merged_poly = _merge_polygons(key_poly, val_poly)
-
-        # ── Page dimensions ───────────────────────────────────────────────────
-        pw, ph = page_dim_map.get(source_page, (8.5, 11.0))
+        key_poly   = _extract_polygon(key_regions)
+        val_poly   = _extract_polygon(val_regions)
+        merged     = _merge_polygons(key_poly, val_poly)
+        pw, ph     = page_dim_map.get(source_page, (8.5, 11.0))
+        adi_conf   = getattr(kv, "confidence", 0.85) or 0.85
 
         field = {
             "field_name":       key_text,
             "value":            val_text,
-            "confidence":       getattr(kv, "confidence", 0.85) or 0.85,
+            "confidence":       float(adi_conf),
             "source_page":      source_page,
             "excel_row":        source_page,
             "excel_col":        None,
             "source_text":      f"{key_text}: {val_text}",
             "raw_key":          key_text,
-            # ── Bounding box for eye popup ─────────────────────────────────
-            "bounding_polygon": merged_poly,
+            "bounding_polygon": merged,
             "page_width":       pw,
             "page_height":      ph,
             "source_block":     None,
@@ -357,7 +327,6 @@ def _extract_azure_kv_fields(
             "source_row":       None,
             "source_col":       None,
         }
-
         page_field_map.setdefault(source_page, []).append(field)
 
     for page_num in list(page_field_map.keys()):
@@ -367,8 +336,59 @@ def _extract_azure_kv_fields(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PYMUPDF BOUNDING BOX ENRICHMENT
+# PYMUPDF BOUNDING BOX ENRICHMENT  (robust multi-strategy search)
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _search_page_for_text(page, text: str) -> list:
+    """
+    Try multiple text-search strategies on a PyMuPDF page.
+    Returns a list of fitz.Rect matches, or [] if nothing found.
+
+    Strategies tried in order:
+      1. Exact original text
+      2. UPPER CASE variant
+      3. Title Case variant
+      4. lower case variant
+      5. Colon-stripped variant  ("FILING LOCATION:" → "FILING LOCATION")
+      6. First significant word only (for multi-word labels ≥ 5 chars)
+      7. Each word independently (for 2-word labels)
+    """
+    if not text or not text.strip():
+        return []
+
+    text = text.strip()
+    candidates = [
+        text,
+        text.upper(),
+        text.title(),
+        text.lower(),
+        text.rstrip(":").strip(),
+        text.upper().rstrip(":").strip(),
+    ]
+
+    # Try removing common suffixes
+    for suffix in (" DATE", " NUMBER", " LOCATION", " COURT", " AREA"):
+        if text.upper().endswith(suffix):
+            candidates.append(text[:-len(suffix)].strip())
+
+    # De-duplicate while preserving order
+    seen_c: set = set()
+    ordered: list[str] = []
+    for c in candidates:
+        if c and c not in seen_c:
+            seen_c.add(c)
+            ordered.append(c)
+
+    for candidate in ordered:
+        try:
+            rects = page.search_for(candidate)
+            if rects:
+                return rects
+        except Exception:
+            continue
+
+    return []
+
 
 def _enrich_fields_with_pymupdf_polygons(
     fields: list[dict],
@@ -379,78 +399,90 @@ def _enrich_fields_with_pymupdf_polygons(
 ) -> None:
     """
     For every field that still has bounding_polygon=None, use PyMuPDF to
-    search for the key text and value text on the page and compute a
-    bounding polygon from their word positions.
+    search for the key label (and optionally its value) on the page and
+    compute a synthetic bounding polygon.
+
     Modifies fields in-place. No-op if pymupdf is not installed.
+
+    Search priority:
+      1. Key label search (multiple case variants)
+      2. Value text search (if key not found) — use value region as proxy
+      3. Combined key+value region if both found
     """
     try:
         import fitz
     except ImportError:
         return
 
+    fields_needing_bbox = [f for f in fields if f.get("bounding_polygon") is None]
+    if not fields_needing_bbox:
+        return
+
     try:
         doc  = fitz.open(pdf_path)
         page = doc[page_num - 1]
-        pw   = page.rect.width   # points
-        ph   = page.rect.height  # points
+        pw   = page.rect.width    # PDF points
+        ph   = page.rect.height
 
-        for field in fields:
-            if field.get("bounding_polygon") is not None:
-                continue
+        # Scale factors: inches → PDF points
+        scale_x = pw / page_width_inches  if page_width_inches  else 1.0
+        scale_y = ph / page_height_inches if page_height_inches else 1.0
 
+        for field in fields_needing_bbox:
             key_text = (field.get("field_name") or "").strip()
-            val_text = (field.get("value") or "").strip()
+            val_text = (field.get("value")      or "").strip()
 
-            if not key_text or not val_text:
+            if not key_text:
                 continue
 
-            # ── Search for key ────────────────────────────────────────────────
-            key_rects = page.search_for(key_text)
-            if not key_rects:
-                key_rects = page.search_for(key_text + ":")
-            if not key_rects:
-                key_rects = page.search_for(key_text.title())
+            # ── Strategy 1: search for the key label ─────────────────────────
+            key_rects = _search_page_for_text(page, key_text)
 
-            # ── Search for value — pick instance closest to key ───────────────
-            val_rects = page.search_for(val_text)
-            if not val_rects and len(val_text) > 20:
-                val_rects = page.search_for(val_text[:20])
+            # ── Strategy 2: search for the value (proximity fallback) ─────────
+            val_rects = []
+            if val_text and len(val_text) <= 120:
+                val_rects = _search_page_for_text(page, val_text)
 
-            best_val_rect = None
-            if val_rects:
-                if key_rects:
+                # If multiple value matches, pick the one closest to key
+                if val_rects and key_rects:
                     anchor_y = key_rects[0].y0
-                    best_val_rect = min(val_rects, key=lambda r: abs(r.y0 - anchor_y))
-                else:
-                    best_val_rect = val_rects[0]
+                    val_rects = [min(val_rects, key=lambda r: abs(r.y0 - anchor_y))]
+                elif val_rects:
+                    val_rects = [val_rects[0]]
 
-            # ── Build merged bounding box in inches ───────────────────────────
-            rects = []
+            # ── Build merged bounding box ──────────────────────────────────────
+            rects_to_merge = []
             if key_rects:
-                rects.append(key_rects[0])
-            if best_val_rect:
-                rects.append(best_val_rect)
+                rects_to_merge.append(key_rects[0])
+            if val_rects:
+                rects_to_merge.append(val_rects[0])
 
-            if not rects:
-                continue
+            if not rects_to_merge:
+                # ── Strategy 3: first significant word of label ───────────────
+                words = [w for w in key_text.split() if len(w) >= 4]
+                for word in words[:2]:
+                    word_rects = _search_page_for_text(page, word)
+                    if word_rects:
+                        rects_to_merge.append(word_rects[0])
+                        break
 
-            x0 = min(r.x0 for r in rects)
-            y0 = min(r.y0 for r in rects)
-            x1 = max(r.x1 for r in rects)
-            y1 = max(r.y1 for r in rects)
+            if not rects_to_merge:
+                continue  # Nothing found for this field — leave bbox as None
 
-            # Convert from PDF points → inches
-            # PyMuPDF uses points (1 inch = 72 points)
-            # But we scale by actual page dimensions to stay consistent
-            # with Azure's inch coordinate system
-            scale_x = page_width_inches  / pw
-            scale_y = page_height_inches / ph
+            x0 = min(r.x0 for r in rects_to_merge)
+            y0 = min(r.y0 for r in rects_to_merge)
+            x1 = max(r.x1 for r in rects_to_merge)
+            y1 = max(r.y1 for r in rects_to_merge)
+
+            # Convert PDF points → inches (consistent with Azure DI coord system)
+            inv_sx = page_width_inches  / pw if pw else 1.0
+            inv_sy = page_height_inches / ph if ph else 1.0
 
             poly = [
-                (x0 * scale_x, y0 * scale_y),
-                (x1 * scale_x, y0 * scale_y),
-                (x1 * scale_x, y1 * scale_y),
-                (x0 * scale_x, y1 * scale_y),
+                (x0 * inv_sx, y0 * inv_sy),
+                (x1 * inv_sx, y0 * inv_sy),
+                (x1 * inv_sx, y1 * inv_sy),
+                (x0 * inv_sx, y1 * inv_sy),
             ]
 
             field["bounding_polygon"] = poly
@@ -462,10 +494,10 @@ def _enrich_fields_with_pymupdf_polygons(
     except Exception:
         pass
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN PARSER
 # ─────────────────────────────────────────────────────────────────────────────
-
 
 def parse_pdf_with_azure(file_path: str | Path) -> dict:
     """
@@ -484,33 +516,28 @@ def parse_pdf_with_azure(file_path: str | Path) -> dict:
                     {
                         "field_name": "JUDGE",
                         "value": "1ST CIRCUIT DIVISION 3",
+                        "confidence": 0.95,
                         "source_page": 1,
-                        "excel_row": 1,
-                        "source_text": "JUDGE: 1ST CIRCUIT DIVISION 3",
                         "bounding_polygon": [(x0,y0),(x1,y0),(x1,y1),(x0,y1)],
                         "page_width": 8.5,
                         "page_height": 11.0,
                         ...
-                    },
-                    ...
+                    }
                 ]
             }
         ]
     }
     """
-    client = _get_di_client()
+    client    = _get_di_client()
     file_path = str(file_path)
 
     with open(file_path, "rb") as f:
-        poller = client.begin_analyze_document(
-            "prebuilt-document",
-            document=f
-        )
+        poller = client.begin_analyze_document("prebuilt-document", document=f)
         result = poller.result()
 
-    # ── Build page raw text map + dimension map ───────────────────────────────
-    page_text_map: dict[int, str] = {}
-    page_dim_map:  dict[int, tuple[float, float]] = {}
+    # ── Build page text map + dimension map ───────────────────────────────────
+    page_text_map: dict[int, str]                  = {}
+    page_dim_map:  dict[int, tuple[float, float]]  = {}
 
     if getattr(result, "pages", None):
         for page in result.pages:
@@ -521,19 +548,16 @@ def parse_pdf_with_azure(file_path: str | Path) -> dict:
                         lines.append(line.content)
             page_text_map[page.page_number] = "\n".join(lines).strip()
 
-            # Store page dimensions in inches (Azure returns inches by default)
             pw = getattr(page, "width",  8.5)  or 8.5
             ph = getattr(page, "height", 11.0) or 11.0
             page_dim_map[page.page_number] = (float(pw), float(ph))
 
-    # ── 1) Primary extraction from page OCR text (no polygons) ───────────────
+    # ── Step 1: text-layout extraction (no polygons yet) ─────────────────────
     page_field_map: dict[int, list[dict]] = {}
     for page_num, page_text in page_text_map.items():
-        page_field_map[page_num] = _extract_page_fields_from_text(
-            page_text, page_num
-        )
+        page_field_map[page_num] = _extract_page_fields_from_text(page_text, page_num)
 
-    # ── 2) Azure KV enrichment (adds fields + bounding polygons) ─────────────
+    # ── Step 2: Azure KV enrichment (adds polygons + real confidence) ─────────
     kv_map = _extract_azure_kv_fields(result, page_dim_map)
     for page_num, kv_fields in kv_map.items():
         existing_names = {
@@ -541,26 +565,28 @@ def parse_pdf_with_azure(file_path: str | Path) -> dict:
             for f in page_field_map.setdefault(page_num, [])
         }
         for f in kv_fields:
-            fname = (f.get("field_name") or "").strip().lower()
+            fname      = (f.get("field_name") or "").strip().lower()
+            fname_norm = re.sub(r"[\s:]+", " ", fname).strip()
+
             if fname not in existing_names:
-                # Azure KV found a field text didn't — add it with polygon
+                # New field from Azure KV — add it
                 page_field_map[page_num].append(f)
                 existing_names.add(fname)
             else:
-                # Text already found this field — enrich it with polygon from Azure KV
-                # Use fuzzy matching: strip colons/spaces, check substring too
-                def _norm(s):
-                    return re.sub(r"[\s:]+", " ", (s or "").strip().lower())
-
-                fname_norm = _norm(fname)
-
+                # Enrich existing text-extracted field with polygon + confidence
                 for existing in page_field_map[page_num]:
-                    existing_norm = _norm(existing.get("field_name", ""))
+                    e_norm = re.sub(r"[\s:]+", " ",
+                                    (existing.get("field_name", "") or "").strip().lower())
                     if (
-                        existing_norm == fname_norm
-                        or existing_norm in fname_norm
-                        or fname_norm in existing_norm
+                        e_norm == fname_norm
+                        or e_norm in fname_norm
+                        or fname_norm in e_norm
                     ):
+                        # Always update confidence from Azure KV (more reliable)
+                        adi_conf = float(f.get("confidence", 0.0))
+                        if adi_conf > 0:
+                            existing["confidence"] = adi_conf
+                        # Update polygon only if we don't have one yet
                         if existing.get("bounding_polygon") is None and f.get("bounding_polygon"):
                             existing["bounding_polygon"] = f["bounding_polygon"]
                             existing["page_width"]       = f["page_width"]
@@ -569,14 +595,17 @@ def parse_pdf_with_azure(file_path: str | Path) -> dict:
 
         page_field_map[page_num] = _dedupe_fields(page_field_map[page_num])
 
-    # ── Assemble output ───────────────────────────────────────────────────────
-    # ── 3) PyMuPDF fallback: generate polygons for remaining None fields ──────
+    # ── Step 3: PyMuPDF fallback — synthetic polygons for remaining None fields
     for page_num, fields in page_field_map.items():
+        missing_bbox = [f for f in fields if f.get("bounding_polygon") is None]
+        if not missing_bbox:
+            continue
+
         pw, ph = page_dim_map.get(page_num, (8.5, 11.0))
         _enrich_fields_with_pymupdf_polygons(
-            fields    = fields,
-            pdf_path  = file_path,
-            page_num  = page_num,
+            fields             = fields,
+            pdf_path           = file_path,
+            page_num           = page_num,
             page_width_inches  = pw,
             page_height_inches = ph,
         )

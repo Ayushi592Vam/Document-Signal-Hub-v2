@@ -6,7 +6,6 @@ Orchestrates all modules and renders the Streamlit UI.
 import os
 from dotenv import load_dotenv, find_dotenv
 
-# Load .env before anything else so API keys are available to all modules
 _app_dir  = os.path.dirname(os.path.abspath(__file__))
 _env_path = os.path.join(_app_dir, ".env")
 if os.path.exists(_env_path):
@@ -71,13 +70,29 @@ from ui.dialogs import (
 import tempfile
 import datetime
 from modules.word_parser import parse_word
+
+# ── PDF analysis panel — guarded import ──────────────────────────────────────
+try:
+    from ui.pdf_analysis import render_pdf_analysis_panel
+    _PDF_PANEL_AVAILABLE = True
+except ImportError as _pdf_panel_err:
+    _PDF_PANEL_AVAILABLE = False
+    _pdf_panel_err_msg   = str(_pdf_panel_err)
+
+
 # ════════════════════════════════════════════════════════════════════════════
-# Private helpers  (defined BEFORE any st.* calls so Python can find them)
+# PDF doc types that use the intelligence panel instead of claims panel
+# FIX: "Loss Run" added — pdf_intelligence now handles all 4 document types
+# ════════════════════════════════════════════════════════════════════════════
+_PDF_INTELLIGENCE_TYPES = {"FNOL", "Legal", "Medical", "Loss Run"}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Private helpers
 # ════════════════════════════════════════════════════════════════════════════
 
 def _extract_pdf_pages(pdf_path: str) -> list[str]:
     errors: list[str] = []
-
     try:
         from pypdf import PdfReader
         reader = PdfReader(pdf_path)
@@ -88,7 +103,6 @@ def _extract_pdf_pages(pdf_path: str) -> list[str]:
         errors.append("pypdf not installed")
     except Exception as e:
         errors.append(f"pypdf: {e}")
-
     try:
         import PyPDF2
         with open(pdf_path, "rb") as fh:
@@ -100,7 +114,6 @@ def _extract_pdf_pages(pdf_path: str) -> list[str]:
         errors.append("PyPDF2 not installed")
     except Exception as e:
         errors.append(f"PyPDF2: {e}")
-
     try:
         import pdfplumber
         with pdfplumber.open(pdf_path) as pdf:
@@ -111,10 +124,8 @@ def _extract_pdf_pages(pdf_path: str) -> list[str]:
         errors.append("pdfplumber not installed")
     except Exception as e:
         errors.append(f"pdfplumber: {e}")
-
     try:
         from pdfminer.high_level import extract_pages
-        from pdfminer.layout import LTAnon, LTChar, LTTextBox, LTTextLine
         page_texts = []
         for page_layout in extract_pages(pdf_path):
             buf = []
@@ -126,47 +137,12 @@ def _extract_pdf_pages(pdf_path: str) -> list[str]:
             return page_texts
     except Exception as e:
         errors.append(f"pdfminer: {e}")
-
     if errors:
         st.warning(
             "PDF extraction failed:\n" + "\n".join(f"• {e}" for e in errors)
             + "\n\nFix: `pip install pypdf pdfplumber pdfminer.six`"
         )
     return []
-
-
-def _tag_fields_with_pages(fields, pages: list[str]) -> None:
-    for field in fields:
-        val = (field.extracted_value or "").strip()[:80]
-        if not val:
-            field.source_page = 1
-            continue
-        for i, page_text in enumerate(pages):
-            if val.lower() in page_text.lower():
-                field.source_page = i + 1
-                break
-        else:
-            field.source_page = 1
-
-
-def _fields_to_row(fields, page_num: int) -> dict:
-    row: dict  = {}
-    seen: set  = set()
-    for i, field in enumerate(fields):
-        name = field.field_name
-        if name in seen:
-            name = f"{name} (p{page_num})"
-        seen.add(name)
-        row[name] = {
-            "value":        field.extracted_value,
-            "modified":     field.modified_value or field.extracted_value,
-            "excel_row":    page_num,
-            "excel_col":    i + 1,
-            "original":     field.extracted_value,
-            "_section":     field.section,
-            "_source_page": page_num,
-        }
-    return row
 
 
 def _word_fields_to_row(fields: list[dict]) -> dict:
@@ -177,138 +153,87 @@ def _word_fields_to_row(fields: list[dict]) -> dict:
             continue
         val = str(f.get("value", "") or "").strip()
         row[field_name] = {
-            "value": val,
-            "modified": val,
-            "source_type": "word",
+            "value": val, "modified": val,
+            "source_type":  "word",
             "source_block": f.get("source_block"),
-            "source_para": f.get("source_para"),
+            "source_para":  f.get("source_para"),
             "source_table": f.get("source_table"),
-            "source_row": f.get("source_row"),
-            "source_col": f.get("source_col"),
-            "source_text": f.get("source_text", ""),
-            "excel_row": None,
-            "excel_col": None,
+            "source_row":   f.get("source_row"),
+            "source_col":   f.get("source_col"),
+            "source_text":  f.get("source_text", ""),
+            "excel_row": None, "excel_col": None,
         }
     return row
 
 
-_SINGLE_ENTITY_DOC_TYPES: set | None = None
-
-
-def _get_single_entity_types():
-    global _SINGLE_ENTITY_DOC_TYPES
-    if _SINGLE_ENTITY_DOC_TYPES is None:
-        from modules.doc_classifier import DocumentType
-        _SINGLE_ENTITY_DOC_TYPES = {
-            DocumentType.TRELLIS_DOCKET,
-            DocumentType.LEGAL_COMPLAINT,
-            DocumentType.POLICE_REPORT,
-            DocumentType.INSURANCE_POLICY,
-            DocumentType.FNOL,
-            DocumentType.COVERAGE_LETTER,
-            DocumentType.REPAIR_ESTIMATE,
-            DocumentType.GENERIC,
-        }
-    return _SINGLE_ENTITY_DOC_TYPES
-
-
 def _parse_pdf(file_path: str):
     """
-    Parse PDF using Azure Document Intelligence and return page-wise rows
-    in the same shape the UI expects.
+    Parse a PDF via Azure Document Intelligence.
+    Returns (data, sheet_type, None, azure_result).
 
-    No schema mapping. Raw fields shown as extracted.
-    excel_row = page_num (int) so the eye popup renders the correct page.
-    bounding_polygon is passed through for the eye popup highlight.
+    FIX: confidence is now stored per field so the bbox popup can display
+         the real Azure DI confidence score instead of always showing 0%.
     """
     from modules.pdf_azure_parser import parse_pdf_with_azure
-
     result = parse_pdf_with_azure(file_path)
-
-    data = []
-
+    data   = []
     for page in result.get("pages", []):
         page_num = page.get("page_num", 1)
         row = {}
-
         for f in page.get("fields", []):
             field_name = (f.get("field_name") or "").strip()
             if not field_name:
                 continue
-
             val = str(f.get("value", "") or "").strip()
             if not val:
                 continue
-
-            excel_row = f.get("excel_row")
-            if not excel_row:
-                excel_row = page_num
-
+            excel_row = f.get("excel_row") or page_num
             row[field_name] = {
-                "value":        val,
-                "modified":     val,
-                "original":     val,
-
-                # ── eye popup location ─────────────────────────────────────────
-                "excel_row":    int(excel_row),
-                "excel_col":    None,
-
-                # ── traceability ───────────────────────────────────────────────
-                "source_type":  "pdf",
-                "source_page":  int(f.get("source_page", page_num)),
-                "source_text":  f.get("source_text", f"{field_name}: {val}"),
-
-                # ── Azure DI bounding box for eye popup highlight ──────────────
+                "value":            val,
+                "modified":         val,
+                "original":         val,
+                "excel_row":        int(excel_row),
+                "excel_col":        None,
+                "source_type":      "pdf",
+                "source_page":      int(f.get("source_page", page_num)),
+                "source_text":      f.get("source_text", f"{field_name}: {val}"),
                 "bounding_polygon": f.get("bounding_polygon"),
                 "page_width":       f.get("page_width",  8.5),
                 "page_height":      f.get("page_height", 11.0),
-
-                # ── claim_panel routing ────────────────────────────────────────
-                "_pdf_raw":     True,
-
-                # compatibility placeholders
-                "source_block": None,
-                "source_para":  None,
-                "source_table": None,
-                "source_row":   None,
-                "source_col":   None,
+                "confidence":       float(f.get("confidence", 0.0)),  # Azure DI confidence
+                "_pdf_raw":         True,
+                "source_block":     None,
+                "source_para":      None,
+                "source_table":     None,
+                "source_row":       None,
+                "source_col":       None,
             }
-
         if row:
             data.append(row)
-
-    sheet_type      = "PDF"
-    _doc_type_enum  = None
-
-    return data, sheet_type, _doc_type_enum
+    return data, "PDF", None, result
 
 
 def _doc_type_enum_to_label(doc_type_enum) -> str | None:
+    """Convert a doc-type enum to a human-readable label."""
     if doc_type_enum is None:
         return None
     try:
-        from modules.doc_classifier import get_label
-        return get_label(doc_type_enum)
-    except Exception:
         return doc_type_enum.value.replace("_", " ").title()
+    except Exception:
+        return str(doc_type_enum)
 
 
-# ── Page config ──────────────────────────────────────────────────────────────
-st.set_page_config(layout="wide", page_title="TPA Loss Run Parser", page_icon="🛡️")
-
-# ── Global CSS ───────────────────────────────────────────────────────────────
+# ── Page config ───────────────────────────────────────────────────────────────
+st.set_page_config(layout="wide", page_title="Document Signal Hub", page_icon="🛡️")
 st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
 
-# ── Session state defaults ───────────────────────────────────────────────────
 for _k, _v in SESSION_DEFAULTS.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
-# ── Session start timestamp ──────────────────────────────────────────────────
 if "_session_start" not in st.session_state:
     st.session_state["_session_start"] = datetime.datetime.utcnow().isoformat()
 
-# ── One-time migration: clear stale claim dup snapshots with empty fields ────
 if "claim_dup_migrated_v2" not in st.session_state:
     try:
         from modules.claim_dup_store import _load_claim_dup_store, _save_claim_dup_store
@@ -328,12 +253,10 @@ if "claim_dup_migrated_v2" not in st.session_state:
 if "focus_field" not in st.session_state:
     st.session_state.focus_field = None
 
-# ── Top bar ──────────────────────────────────────────────────────────────────
 _settings_clicked = render_topbar(SCHEMAS, _CONFIG_LOAD_STATUS)
 if _settings_clicked:
     show_settings_dialog(SCHEMAS, _CONFIG_LOAD_STATUS)
 
-# ── Schema popup ─────────────────────────────────────────────────────────────
 if st.session_state.get("schema_popup_target"):
     _target = st.session_state["schema_popup_target"]
     st.session_state["schema_popup_target"] = None
@@ -343,7 +266,6 @@ if st.session_state.get("_open_cache_manager"):
     st.session_state["_open_cache_manager"] = False
     show_cache_manager_dialog()
 
-# ── Claim journey dialog (persistent flag pattern) ───────────────────────────
 if st.session_state.get("_open_journey_dialog"):
     _jd = st.session_state["_open_journey_dialog"]
     show_claim_journey_dialog(
@@ -356,13 +278,16 @@ if st.session_state.get("_open_journey_dialog"):
 
 _, col_sheet_dropdown = st.columns([6.8, 1.2])
 
-# ── File upload ──────────────────────────────────────────────────────────────
-uploaded = st.file_uploader("Upload Loss Run Excel/CSV/PDF", type=["xlsx", "csv", "pdf", "docx"])
+uploaded = st.file_uploader(
+    "Upload Excel/CSV/PDF",
+    type=["xlsx", "csv", "pdf", "docx"],
+    accept_multiple_files=False,
+    key="main_uploader",
+)
 
 if not uploaded:
     st.stop()
 
-# ── Temp file management ─────────────────────────────────────────────────────
 if "tmpdir" not in st.session_state:
     st.session_state.tmpdir = tempfile.mkdtemp()
 
@@ -378,34 +303,33 @@ if st.session_state.get("last_uploaded") != _upload_fingerprint:
     if file_ext == ".pdf":
         from modules.pdf_azure_parser import get_pdf_sheet_names
         st.session_state.sheet_names = get_pdf_sheet_names(excel_path)
+        # Clear intelligence cache so it re-runs for the new file
+        st.session_state.pop("_pdf_intelligence", None)
+        st.session_state.pop("_pdf_intelligence_file", None)
+        st.session_state.pop("_adi_lookup", None)
+        st.session_state.pop("_adi_lookup_file", None)
     elif file_ext == ".docx":
         st.session_state.sheet_names = ["Document"]
     else:
         st.session_state.sheet_names = get_sheet_names(excel_path)
-    st.session_state.sheet_cache   = {}
-    st.session_state.selected_idx  = 0
-    st.session_state.focus_field   = None
 
+    st.session_state.sheet_cache  = {}
+    st.session_state.selected_idx = 0
+    st.session_state.focus_field  = None
+
+    # Clear all per-file session keys
     for key in list(st.session_state.keys()):
         if (
-            key.startswith("_rendered_")
-            or key.startswith("_llm_fieldmap_")
-            or key.startswith("_claim_dup_results_")
-            or key.startswith("mod_")
-            or key.startswith("edit_")
-            or key.startswith("_fv_")
-            or key.startswith("_v_")
-            or key.startswith("err_")
-            or key.startswith("disp_")
-            or key.startswith("_frozen_")
-            or key.startswith("chk_")
-            or key.startswith("_chk_")
-            or key.startswith("_col_")
-            or key.startswith("show_live_")
-            or key.startswith("_std_json")
-            or key.startswith("_schema_export")
-            or key.startswith("user_added_")
-            or key.startswith("_claim_id_edit_warn_")
+            key.startswith("_rendered_") or key.startswith("_llm_fieldmap_")
+            or key.startswith("_claim_dup_results_") or key.startswith("mod_")
+            or key.startswith("edit_") or key.startswith("_fv_")
+            or key.startswith("_v_") or key.startswith("err_")
+            or key.startswith("disp_") or key.startswith("_frozen_")
+            or key.startswith("chk_") or key.startswith("_chk_")
+            or key.startswith("_col_") or key.startswith("show_live_")
+            or key.startswith("_std_json") or key.startswith("_schema_export")
+            or key.startswith("user_added_") or key.startswith("_claim_id_edit_warn_")
+            or key.startswith("_pdf_edit") or key.startswith("_pdf_edit_hist")
             or key == "_open_journey_dialog"
         ):
             del st.session_state[key]
@@ -442,11 +366,11 @@ if st.session_state.get("last_uploaded") != _upload_fingerprint:
         }
         _save_hash_store(hash_store)
         _append_audit({
-            "event":      "FILE_INGESTED",
-            "timestamp":  datetime.datetime.now().isoformat(),
-            "filename":   uploaded.name,
-            "file_hash":  file_hash,
-            "sheets":     st.session_state.sheet_names,
+            "event":     "FILE_INGESTED",
+            "timestamp": datetime.datetime.now().isoformat(),
+            "filename":  uploaded.name,
+            "file_hash": file_hash,
+            "sheets":    st.session_state.sheet_names,
         })
 
     _sheet_hash_index = {}
@@ -470,7 +394,6 @@ else:
 is_dup         = st.session_state.get("is_duplicate_file", False)
 sheet_dup_info = st.session_state.get("sheet_dup_info", {})
 
-# ── File card ─────────────────────────────────────────────────────────────────
 render_file_card(
     uploaded, excel_path, file_hash, is_dup,
     sheet_dup_info, st.session_state.sheet_names,
@@ -483,7 +406,6 @@ with col_sheet_dropdown:
     )
 
 st.markdown("<hr>", unsafe_allow_html=True)
-
 
 # ── Sheet cache / parse ───────────────────────────────────────────────────────
 sh_hash = sheet_hashes.get(selected_sheet, "")
@@ -511,6 +433,7 @@ if selected_sheet not in st.session_state.sheet_cache:
                         "bounding_polygon": fd.get("bounding_polygon"),
                         "page_width":       fd.get("page_width",  8.5),
                         "page_height":      fd.get("page_height", 11.0),
+                        "confidence":       float(fd.get("confidence", 0.0)),
                     }
             if row:
                 _data.append(row)
@@ -522,7 +445,7 @@ if selected_sheet not in st.session_state.sheet_cache:
 
             # ── PDF branch ────────────────────────────────────────────────────
             if file_ext == ".pdf":
-                all_pages_data, sheet_type, _doc_type_enum = _parse_pdf(excel_path)
+                all_pages_data, sheet_type, _doc_type_enum, _azure_result = _parse_pdf(excel_path)
 
                 try:
                     selected_page_num = int(selected_sheet.replace("Page", "").strip())
@@ -539,8 +462,7 @@ if selected_sheet not in st.session_state.sheet_cache:
                 _col_rename_log = {}
                 total_rows      = len(data)
                 total_cols      = len(data[0]) if data else 0
-
-                _title_flds = {}
+                _title_flds     = {}
                 if data and isinstance(data[0], dict):
                     for k, v in list(data[0].items())[:8]:
                         _title_flds[k] = {
@@ -548,13 +470,27 @@ if selected_sheet not in st.session_state.sheet_cache:
                             "modified": v.get("modified", v.get("value", "")) if isinstance(v, dict) else str(v),
                         }
 
+                # ── Run PDF intelligence pipeline (only once per file) ─────────
+                _intel_file_key = "_pdf_intelligence_file"
+                _intel_key      = "_pdf_intelligence"
+                if st.session_state.get(_intel_file_key) != excel_path:
+                    with st.spinner("🧠 Running AI document analysis…"):
+                        try:
+                            from modules.pdf_intelligence import run_pdf_intelligence
+                            from modules.pdf_azure_parser import parse_pdf_with_azure
+                            _parsed_for_intel = parse_pdf_with_azure(excel_path)
+                            _intel = run_pdf_intelligence(_parsed_for_intel)
+                            st.session_state[_intel_key]      = _intel
+                            st.session_state[_intel_file_key] = excel_path
+                        except Exception as _e:
+                            st.session_state[_intel_key]      = {}
+                            st.session_state[_intel_file_key] = excel_path
+
             # ── DOCX branch ───────────────────────────────────────────────────
             elif file_ext == ".docx":
-                word_result = parse_word(excel_path, llm_client=None)
-
-                parsed_rows = [_word_fields_to_row(word_result.get("fields", []))]
-                data = parsed_rows
-
+                word_result     = parse_word(excel_path, llm_client=None)
+                parsed_rows     = [_word_fields_to_row(word_result.get("fields", []))]
+                data            = parsed_rows
                 sheet_type      = "WORD_DOCUMENT"
                 merged_meta     = {}
                 totals_data     = {}
@@ -562,8 +498,7 @@ if selected_sheet not in st.session_state.sheet_cache:
                 total_cols      = len(parsed_rows[0]) if parsed_rows else 0
                 _col_rename_log = {}
                 _doc_type_enum  = None
-
-                _title_flds = {
+                _title_flds     = {
                     f["field_name"]: {
                         "value":    f.get("value", ""),
                         "modified": f.get("value", "")
@@ -571,25 +506,20 @@ if selected_sheet not in st.session_state.sheet_cache:
                     for f in word_result.get("fields", [])[:8]
                     if f.get("field_name")
                 }
-
                 if not selected_sheet:
                     selected_sheet = "Document"
-
                 try:
                     sh_hash = _compute_sheet_sha256(excel_path, selected_sheet)
                 except Exception:
                     sh_hash = None
-
                 sheet_hashes = {selected_sheet: sh_hash}
 
             # ── Excel / CSV branch ────────────────────────────────────────────
             else:
                 _doc_type_enum = None
-
-                # ── FIX: extract_from_excel returns 3 values ──────────────────
-                _excel_result = extract_from_excel(excel_path, selected_sheet)
-                data       = _excel_result[0]
-                sheet_type = _excel_result[1]
+                _excel_result  = extract_from_excel(excel_path, selected_sheet)
+                data           = _excel_result[0]
+                sheet_type     = _excel_result[1]
                 _title_kvs_raw = _excel_result[2] if len(_excel_result) > 2 else {}
 
                 if not data:
@@ -606,11 +536,7 @@ if selected_sheet not in st.session_state.sheet_cache:
                             inf["value"] = normalize_str(inf["value"])
                         inf["modified"] = inf.get("value", "")
 
-                # Build title fields from merged cells first
                 _title_flds = extract_title_fields(merged_meta)
-
-                # ── Merge in title KVs from parsing (key/value in separate
-                #    cells like "Prepared For:" | "Munich Re…") ──────────────
                 if _title_kvs_raw:
                     for _tk, _tv in _title_kvs_raw.items():
                         if _tk not in _title_flds:
@@ -664,13 +590,14 @@ if selected_sheet not in st.session_state.sheet_cache:
             })
 
     else:
-        data        = _data
-        sheet_type  = _cached.get("sheet_type", "UNKNOWN")
-        total_rows  = _cached.get("total_rows", 0)
-        total_cols  = _cached.get("total_cols", 0)
-        merged_meta = {}
-        totals_data = {}
-        _title_flds = {}
+        # ── Sheet loaded from feature store cache ─────────────────────────────
+        data            = _data
+        sheet_type      = _cached.get("sheet_type", "UNKNOWN")
+        total_rows      = _cached.get("total_rows", 0)
+        total_cols      = _cached.get("total_cols", 0)
+        merged_meta     = {}
+        totals_data     = {}
+        _title_flds     = {}
         _col_rename_log = {}
         try:
             merged_meta = extract_merged_cell_metadata(excel_path, selected_sheet)
@@ -708,51 +635,77 @@ if selected_sheet not in st.session_state.sheet_cache:
     if _cur_schema and _cur_schema in SCHEMAS:
         auto_normalize_on_schema_activate(
             st.session_state.sheet_cache[selected_sheet]["data"],
-            _cur_schema,
-            selected_sheet,
+            _cur_schema, selected_sheet,
         )
         st.session_state.sheet_cache[selected_sheet]["_normalized_for"] = _cur_schema
 
 
 # ── Active sheet context ──────────────────────────────────────────────────────
-active          = st.session_state.sheet_cache[selected_sheet]
-data            = active["data"]
-merged_meta     = active.get("merged_meta", {})
-totals_data     = active.get("totals", {})
-title_fields    = active.get("title_fields", {})
-sheet_type      = active.get("sheet_type", "UNKNOWN")
-total_rows      = active.get("total_rows", 0)
-total_cols      = active.get("total_cols", 0)
-sh_hash         = active.get("sheet_hash", "")
-_from_cache     = active.get("_from_cache", False)
-_nav_doc_type   = active.get("doc_type")
-_nav_doc_label  = active.get("doc_label")
+active       = st.session_state.sheet_cache[selected_sheet]
+data         = active["data"]
+merged_meta  = active.get("merged_meta", {})
+totals_data  = active.get("totals", {})
+title_fields = active.get("title_fields", {})
+sheet_type   = active.get("sheet_type", "UNKNOWN")
+total_rows   = active.get("total_rows", 0)
+total_cols   = active.get("total_cols", 0)
+sh_hash      = active.get("sheet_hash", "")
+_from_cache  = active.get("_from_cache", False)
 
-# ── Auto-normalize on schema switch ──────────────────────────────────────────
+
+# ── Ensure PDF intelligence runs even when sheet data loaded from cache ───────
+#
+# WHY: The intelligence pipeline only runs inside `if not _cached: → PDF branch`.
+# When the same PDF is re-uploaded and sheet data is already in the feature store,
+# the cache branch is taken and intelligence is never re-run, leaving
+# _pdf_intelligence empty → _pdf_doc_type="" → _use_intel_panel=False → Excel UI.
+#
+# This single guard runs ONCE per file (keyed on excel_path) regardless of
+# whether data came from cache or a fresh parse.
+if file_ext == ".pdf" and st.session_state.get("_pdf_intelligence_file") != excel_path:
+    with st.spinner("🧠 Running AI document analysis…"):
+        try:
+            from modules.pdf_intelligence import run_pdf_intelligence
+            from modules.pdf_azure_parser import parse_pdf_with_azure
+            _parsed_for_intel = parse_pdf_with_azure(excel_path)
+            _intel = run_pdf_intelligence(_parsed_for_intel)
+            st.session_state["_pdf_intelligence"]      = _intel
+            st.session_state["_pdf_intelligence_file"] = excel_path
+        except Exception as _e:
+            st.session_state["_pdf_intelligence"]      = {}
+            st.session_state["_pdf_intelligence_file"] = excel_path
+
+
+# ── Determine if this PDF needs the intelligence panel ────────────────────────
+_intelligence    = st.session_state.get("_pdf_intelligence", {})
+_pdf_doc_type    = _intelligence.get("doc_type", "") if file_ext == ".pdf" else ""
+_use_intel_panel = file_ext == ".pdf" and _pdf_doc_type in _PDF_INTELLIGENCE_TYPES
+
+
+# ── Auto-normalize ────────────────────────────────────────────────────────────
 _active_schema_now = st.session_state.get("active_schema")
 _normalized_for    = active.get("_normalized_for")
 if (
-    _active_schema_now
-    and _active_schema_now in SCHEMAS
+    _active_schema_now and _active_schema_now in SCHEMAS
     and _normalized_for != _active_schema_now
 ):
     auto_normalize_on_schema_activate(data, _active_schema_now, selected_sheet)
     active["_normalized_for"] = _active_schema_now
 
-# ── LLM field-map ─────────────────────────────────────────────────────────────
+
+# ── LLM field-map (Excel/CSV only) ───────────────────────────────────────────
 _llm_map_result = {}
 _llm_map_ran    = False
 _llm_map_count  = 0
 
 if data and file_ext != ".pdf":
-    _sample_keys   = list(data[0].keys())
-    _ref_schema    = (
+    _sample_keys = list(data[0].keys())
+    _ref_schema  = (
         _active_schema_now
         if (_active_schema_now and _active_schema_now in SCHEMAS)
         else "Guidewire"
     )
     _needs_llm_map = _has_unknown_fields(_sample_keys, _ref_schema)
-
     if _needs_llm_map:
         _llm_map_result = llm_map_unknown_fields(data[:5], _ref_schema, selected_sheet)
         _llm_map_count  = len(_llm_map_result.get("mappings", {}))
@@ -761,7 +714,7 @@ if data and file_ext != ".pdf":
             active["_llm_field_map"] = _llm_map_result
             _llm_mappings    = _llm_map_result.get("mappings", {})
             _already_renamed = active.get("_llm_renamed", False)
-            if _llm_mappings and not _already_renamed and file_ext != ".pdf":
+            if _llm_mappings and not _already_renamed:
                 active["data"], _extra_renames = rename_columns_to_standard(
                     active["data"], llm_map=_llm_map_result
                 )
@@ -772,22 +725,27 @@ if data and file_ext != ".pdf":
 
 _llm_map_result = active.get("_llm_field_map", {})
 
-# ── Field-value dup index ─────────────────────────────────────────────────────
-_field_dup_index_key = f"_fdi_{selected_sheet}"
-if _field_dup_index_key not in st.session_state:
-    st.session_state[_field_dup_index_key] = _build_field_value_index(data, selected_sheet)
-_field_dup_index = st.session_state[_field_dup_index_key]
 
-# ── Claim-level duplicate detection ──────────────────────────────────────────
-_claim_dup_key = f"_claim_dup_results_{selected_sheet}"
-if _claim_dup_key not in st.session_state:
-    st.session_state[_claim_dup_key] = check_and_register_claims(
-        data=data,
-        sheet_name=selected_sheet,
-        filename=uploaded.name,
-        detect_claim_id_fn=detect_claim_id,
-    )
-_claim_dup_results = st.session_state[_claim_dup_key]
+# ── Dup indexes (skip for intel PDFs) ────────────────────────────────────────
+_field_dup_index   = {}
+_claim_dup_results = {}
+
+if not _use_intel_panel:
+    _field_dup_index_key = f"_fdi_{selected_sheet}"
+    if _field_dup_index_key not in st.session_state:
+        st.session_state[_field_dup_index_key] = _build_field_value_index(data, selected_sheet)
+    _field_dup_index = st.session_state[_field_dup_index_key]
+
+    _claim_dup_key = f"_claim_dup_results_{selected_sheet}"
+    if _claim_dup_key not in st.session_state:
+        st.session_state[_claim_dup_key] = check_and_register_claims(
+            data=data,
+            sheet_name=selected_sheet,
+            filename=uploaded.name,
+            detect_claim_id_fn=detect_claim_id,
+        )
+    _claim_dup_results = st.session_state[_claim_dup_key]
+
 
 # ── Sheet card ────────────────────────────────────────────────────────────────
 render_sheet_card(
@@ -800,61 +758,83 @@ if _llm_map_ran:
     from ui.sheet_card import render_llm_map_banner
     render_llm_map_banner(_llm_map_result, _llm_map_count)
 
-# ── Three-column layout ───────────────────────────────────────────────────────
-curr_claim = data[st.session_state.selected_idx]
 
-_frozen_id_key = f"_frozen_claim_id_{selected_sheet}_{st.session_state.selected_idx}"
-if _frozen_id_key not in st.session_state:
-    st.session_state[_frozen_id_key] = detect_claim_id(curr_claim)
-curr_claim_id = st.session_state[_frozen_id_key]
+# ════════════════════════════════════════════════════════════════════════════
+# ROUTING: PDF intelligence panel vs standard claims panel
+# ════════════════════════════════════════════════════════════════════════════
 
-if enrich_claim_cause_of_loss(curr_claim, curr_claim_id, selected_sheet):
-    st.rerun()
+if _use_intel_panel:
+    # ── FNOL / Legal / Medical / Loss Run PDF ─────────────────────────────────
+    if _PDF_PANEL_AVAILABLE:
+        render_pdf_analysis_panel(
+            intelligence   = _intelligence,
+            uploaded_name  = uploaded.name,
+            selected_sheet = selected_sheet,
+        )
+    else:
+        st.error(
+            f"❌ PDF analysis panel could not be loaded: `{_pdf_panel_err_msg}`\n\n"
+            "**Fix:** ensure `ui/pdf_analysis.py` exists and that "
+            "`ui/__init__.py` is present (can be empty), then restart Streamlit."
+        )
 
-col_nav, col_main, col_fmt = st.columns([1.2, 3.2, 1.4], gap="large")
+else:
+    # ── Loss Run PDF (non-intelligence) / Excel / CSV / DOCX ──────────────────
+    if not data:
+        st.warning("No data found for this sheet.")
+        st.stop()
 
-with col_nav:
-    new_idx = render_nav_panel(
-        data=data,
-        selected_sheet=selected_sheet,
-    )
-    if new_idx is not None and new_idx != st.session_state.selected_idx:
-        _old_frozen = f"_frozen_claim_id_{selected_sheet}_{new_idx}"
-        if _old_frozen in st.session_state:
-            del st.session_state[_old_frozen]
-        st.session_state.selected_idx = new_idx
-        st.session_state.focus_field  = None
-        st.session_state.pop("_open_journey_dialog", None)
+    curr_claim = data[st.session_state.selected_idx]
+
+    _frozen_id_key = f"_frozen_claim_id_{selected_sheet}_{st.session_state.selected_idx}"
+    if _frozen_id_key not in st.session_state:
+        st.session_state[_frozen_id_key] = detect_claim_id(curr_claim)
+    curr_claim_id = st.session_state[_frozen_id_key]
+
+    if enrich_claim_cause_of_loss(curr_claim, curr_claim_id, selected_sheet):
         st.rerun()
 
-with col_main:
-    render_claim_panel(
-        curr_claim=curr_claim,
-        curr_claim_id=curr_claim_id,
-        active=active,
-        selected_sheet=selected_sheet,
-        excel_path=excel_path,
-        merged_meta=merged_meta,
-        totals_data=totals_data,
-        title_fields=title_fields,
-        uploaded_name=uploaded.name,
-        SCHEMAS=SCHEMAS,
-        _llm_map_result=_llm_map_result,
-        _field_dup_index=_field_dup_index,
-        _claim_dup_results=_claim_dup_results,
-    )
+    col_nav, col_main, col_fmt = st.columns([1.2, 3.2, 1.4], gap="large")
 
-with col_fmt:
-    render_export_panel(
-        data=data,
-        curr_claim=curr_claim,
-        curr_claim_id=curr_claim_id,
-        selected_sheet=selected_sheet,
-        sh_hash=sh_hash,
-        uploaded_name=uploaded.name,
-        SCHEMAS=SCHEMAS,
-        merged_meta=merged_meta,
-        totals_data=totals_data,
-        title_fields=title_fields,
-        _llm_map_result=_llm_map_result,
-    )
+    with col_nav:
+        new_idx = render_nav_panel(data=data, selected_sheet=selected_sheet)
+        if new_idx is not None and new_idx != st.session_state.selected_idx:
+            _old_frozen = f"_frozen_claim_id_{selected_sheet}_{new_idx}"
+            if _old_frozen in st.session_state:
+                del st.session_state[_old_frozen]
+            st.session_state.selected_idx = new_idx
+            st.session_state.focus_field  = None
+            st.session_state.pop("_open_journey_dialog", None)
+            st.rerun()
+
+    with col_main:
+        render_claim_panel(
+            curr_claim=curr_claim,
+            curr_claim_id=curr_claim_id,
+            active=active,
+            selected_sheet=selected_sheet,
+            excel_path=excel_path,
+            merged_meta=merged_meta,
+            totals_data=totals_data,
+            title_fields=title_fields,
+            uploaded_name=uploaded.name,
+            SCHEMAS=SCHEMAS,
+            _llm_map_result=_llm_map_result,
+            _field_dup_index=_field_dup_index,
+            _claim_dup_results=_claim_dup_results,
+        )
+
+    with col_fmt:
+        render_export_panel(
+            data=data,
+            curr_claim=curr_claim,
+            curr_claim_id=curr_claim_id,
+            selected_sheet=selected_sheet,
+            sh_hash=sh_hash,
+            uploaded_name=uploaded.name,
+            SCHEMAS=SCHEMAS,
+            merged_meta=merged_meta,
+            totals_data=totals_data,
+            title_fields=title_fields,
+            _llm_map_result=_llm_map_result,
+        )

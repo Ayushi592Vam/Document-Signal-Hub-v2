@@ -315,5 +315,10 @@ div[data-baseweb="popover"] ul{
     stroke:var(--t1)!important;
 }
 
+/* ── Hide the + Add files button in file uploader ── */
+button[data-testid="stBaseButton-borderlessIcon"][aria-label="Add files"] {
+    display: none !important;
+}
+
 </style>
 """
