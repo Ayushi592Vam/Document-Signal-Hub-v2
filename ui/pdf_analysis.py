@@ -607,29 +607,32 @@ def _render_entities_tab(
     selected_sheet: str,
     pdf_path: str | None,
 ) -> None:
+    import streamlit as st
+ 
     intel_fields = _get_intelligence_entities(selected_sheet)
     eds          = _edits()
-
-    # ── Diagnostics + fallback if LLM entities are empty ────────────────────
+ 
+    # ── Diagnostic block when LLM returned no entities ───────────────────────
     if not intel_fields:
         intel    = st.session_state.get("_pdf_intelligence", {})
         analysis = intel.get("analysis", {})
-
-        # Show diagnostic pill row
-        has_intel  = bool(intel)
-        has_summ   = bool(analysis.get("summary", "").strip())
-        has_ents   = bool(analysis.get("entities"))
-        has_ts     = bool(analysis.get("type_specific"))
-        has_sigs   = bool(analysis.get("signals"))
-        doc_type   = intel.get("doc_type", "")
-
+ 
+        has_intel = bool(intel)
+        has_summ  = bool(analysis.get("summary", "").strip())
+        has_ents  = bool(analysis.get("entities"))
+        has_ts    = bool(analysis.get("type_specific"))
+        has_sigs  = bool(analysis.get("signals"))
+        doc_type  = intel.get("doc_type", "")
+ 
         def _pill(label: str, ok: bool) -> str:
             c = "#34d399" if ok else "#f87171"
-            return (f"<span style='background:{c}18;border:1px solid {c}55;"
-                    f"border-radius:20px;padding:3px 10px;font-size:10px;"
-                    f"color:{c};font-family:monospace;'>"
-                    f"{'✓' if ok else '✗'} {label}</span>")
-
+            return (
+                f"<span style='background:{c}18;border:1px solid {c}55;"
+                f"border-radius:20px;padding:3px 10px;font-size:10px;"
+                f"color:{c};font-family:monospace;'>"
+                f"{'✓' if ok else '✗'} {label}</span>"
+            )
+ 
         st.markdown(
             f"<div style='background:#12121c;border:1px solid #2a2a45;"
             f"border-radius:8px;padding:14px 16px;margin-bottom:12px;'>"
@@ -642,70 +645,108 @@ def _render_entities_tab(
             f"{_pill('Entities', has_ents)}"
             f"{_pill('Type fields', has_ts)}"
             f"{_pill('Signals', has_sigs)}"
-            f"{_pill('Doc type: '+doc_type if doc_type else 'Doc type', bool(doc_type))}"
+            f"{_pill('Doc type: ' + doc_type if doc_type else 'Doc type', bool(doc_type))}"
             f"</div>"
-            f"<div style='font-size:11px;color:{_LBL};font-family:monospace;'>"
-            f"{'The LLM ran but returned no entities — this can happen when the document text is too short, the LLM rate-limited, or the field list did not match document content.' if has_intel else 'Intelligence pipeline has not run yet for this file.'}"
+            f"<div style='font-size:11px;color:#8888bb;font-family:monospace;line-height:1.6;'>"
+            f"<b style='color:#f5c842;'>Most likely cause:</b> The LLM's JSON response "
+            f"exceeded the token limit and was truncated mid-object, causing json.loads() "
+            f"to fail. This is fixed in <b>pdf_intelligence.py v3</b> which splits the "
+            f"analysis into two smaller calls. If you are still on v2, please upgrade.<br><br>"
+            f"To diagnose: set <code>PDF_INTEL_DEBUG=1</code> in your environment variables, "
+            f"re-run, then expand the debug panel below."
             f"</div></div>",
             unsafe_allow_html=True,
         )
-
-        # Re-run button
-        col_btn, col_sp = st.columns([2, 5])
+ 
+        # ── Debug panel (only when PDF_INTEL_DEBUG=1 is set) ─────────────────
+        debug_data = st.session_state.get("_pdf_intel_debug", {})
+        if debug_data:
+            with st.expander("🔬 LLM Debug Output (PDF_INTEL_DEBUG=1)"):
+                for key, val in debug_data.items():
+                    st.markdown(
+                        f"<div style='font-size:10px;font-weight:700;color:#a78bfa;"
+                        f"font-family:monospace;margin-bottom:4px;"
+                        f"text-transform:uppercase;'>{key}</div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.code(val[:3000] if len(val) > 3000 else val, language="json")
+        elif intel:
+            st.markdown(
+                f"<div style='font-size:10px;color:#555;font-family:monospace;"
+                f"margin-bottom:8px;'>💡 Set env var <code>PDF_INTEL_DEBUG=1</code> "
+                f"and re-run to capture raw LLM responses for diagnosis.</div>",
+                unsafe_allow_html=True,
+            )
+ 
+        # ── Re-run button ─────────────────────────────────────────────────────
+        col_btn, _ = st.columns([2, 5])
         with col_btn:
             if st.button("🔄 Re-run AI Analysis", use_container_width=True,
                          key="_rerun_intelligence_btn"):
-                st.session_state.pop("_pdf_intelligence", None)
-                st.session_state.pop("_pdf_intelligence_file", None)
-                st.session_state.pop("_adi_lookup", None)
+                for key in ("_pdf_intelligence", "_pdf_intelligence_file",
+                            "_adi_lookup", "_pdf_intel_debug", "_pdf_summary_override"):
+                    st.session_state.pop(key, None)
                 st.rerun()
-
-        # Fall back to raw Azure DI fields with bbox support
+ 
+        # ── Fallback: show raw Azure DI fields ────────────────────────────────
         raw = _get_raw_fields(selected_sheet)
         if not raw:
-            st.info("No fields extracted for this page.")
+            st.info("No fields extracted for this page yet.")
             return
-
+ 
         st.markdown(
             f"<div style='font-size:11px;color:{_LBL};font-family:monospace;"
-            f"margin:8px 0 12px 0;'>📋 Showing raw Azure Document Intelligence "
-            f"fields — bounding boxes and confidence scores are available via 👁</div>",
+            f"margin:8px 0 12px 0;background:#0d0d1a;border:1px solid #2a2a45;"
+            f"border-radius:6px;padding:8px 12px;'>"
+            f"📋 Falling back to raw Azure Document Intelligence fields.<br>"
+            f"Bounding boxes and confidence scores are still available via 👁</div>",
             unsafe_allow_html=True,
         )
         intel_fields = raw
-
-    # Count how many have bounding boxes
+ 
+    # ── Normal render ─────────────────────────────────────────────────────────
     bbox_count = sum(1 for _, fi in intel_fields if fi.get("bounding_polygon"))
-
+    adi_count  = sum(
+        1 for _, fi in intel_fields
+        if fi.get("azure_di_key") or fi.get("_adi_confidence", 0) > 0
+    )
+ 
     st.markdown(
         _section_header(
             "Extracted Entities",
-            f"{len(intel_fields)} LLM-relevant field(s) · "
-            f"{bbox_count} with Azure DI bounding box",
+            (
+                f"{len(intel_fields)} field(s) · "
+                f"{adi_count} Azure DI matched · "
+                f"{bbox_count} with bounding box"
+            ),
         ),
         unsafe_allow_html=True,
     )
-
+ 
     _HDR = (
         "font-size:10px;font-weight:700;font-family:monospace;"
         "text-transform:uppercase;letter-spacing:1.5px;"
         "padding:6px 4px;border-bottom:1px solid #2a2a45;"
     )
     h1, h2, h3, h4 = st.columns([2.5, 3.5, 3.5, 1.0])
-    h1.markdown(f"<div style='{_HDR}color:{_LBL};'>Field Name</div>",                unsafe_allow_html=True)
-    h2.markdown(f"<div style='{_HDR}color:#34d399;'>Extracted</div>",                 unsafe_allow_html=True)
-    h3.markdown(f"<div style='{_HDR}color:#4f9cf9;'>Modified</div>",                  unsafe_allow_html=True)
-    h4.markdown(f"<div style='{_HDR}color:{_LBL};text-align:center;'>Actions</div>", unsafe_allow_html=True)
-
+    h1.markdown(f"<div style='{_HDR}color:{_LBL};'>Field Name</div>",
+                unsafe_allow_html=True)
+    h2.markdown(f"<div style='{_HDR}color:#34d399;'>Extracted</div>",
+                unsafe_allow_html=True)
+    h3.markdown(f"<div style='{_HDR}color:#4f9cf9;'>Modified</div>",
+                unsafe_allow_html=True)
+    h4.markdown(f"<div style='{_HDR}color:{_LBL};text-align:center;'>Actions</div>",
+                unsafe_allow_html=True)
+ 
     st.markdown("<div style='height:4px;'></div>", unsafe_allow_html=True)
-
+ 
     _EM_KEY = "_pdf_edit_mode_fields"
     if _EM_KEY not in st.session_state:
         st.session_state[_EM_KEY] = set()
-
+ 
     _bbox_pending_name: str | None  = None
     _bbox_pending_info: dict | None = None
-
+ 
     for field_name, field_info in intel_fields:
         extracted  = field_info.get("value", "")
         modified   = eds.get(field_name, field_info.get("modified", extracted))
@@ -714,9 +755,9 @@ def _render_entities_tab(
         is_changed = modified != extracted
         confidence = _lookup_confidence(field_name, field_info)
         conf_pct   = int(confidence * 100)
-
+ 
         c1, c2, c3, c4 = st.columns([2.5, 3.5, 3.5, 1.0])
-
+ 
         with c1:
             st.markdown(
                 f"<div style='font-size:12px;font-weight:600;color:{_TXT};"
@@ -726,18 +767,18 @@ def _render_entities_tab(
                    if conf_pct > 0 else ""),
                 unsafe_allow_html=True,
             )
-
+ 
         with c2:
             st.markdown(
                 f"<div style='font-size:12px;color:{_TXT};font-family:monospace;"
                 f"background:#0d0d1a;border:1px solid #1e1e30;"
                 f"padding:7px 10px;border-radius:5px;min-height:34px;"
                 f"line-height:1.5;white-space:pre-wrap;word-break:break-word;'>"
-                f"{extracted if extracted else f'<span style=\"color:#3a3a55;\">—</span>'}"
+                f"{extracted if extracted else '<span style=\"color:#3a3a55;\">—</span>'}"
                 f"</div>",
                 unsafe_allow_html=True,
             )
-
+ 
         with c3:
             if in_edit:
                 st.text_input(
@@ -760,11 +801,11 @@ def _render_entities_tab(
                     f"<div style='font-size:12px;font-family:monospace;{_css}"
                     f"padding:7px 10px;border-radius:5px;min-height:34px;"
                     f"line-height:1.5;white-space:pre-wrap;word-break:break-word;'>"
-                    f"{modified if modified else f'<span style=\"color:#3a3a55;\">—</span>'}"
+                    f"{modified if modified else '<span style=\"color:#3a3a55;\">—</span>'}"
                     f"{_badge}</div>",
                     unsafe_allow_html=True,
                 )
-
+ 
         with c4:
             be, beye = st.columns(2)
             with be:
@@ -779,7 +820,7 @@ def _render_entities_tab(
                     else:
                         st.session_state[_EM_KEY].add(field_name)
                     st.rerun()
-
+ 
             with beye:
                 if has_bbox:
                     tip = f"View in document · Azure DI confidence: {conf_pct}%"
@@ -789,15 +830,14 @@ def _render_entities_tab(
                              disabled=not has_bbox, use_container_width=True):
                     _bbox_pending_name = field_name
                     _bbox_pending_info = field_info
-
+ 
         st.markdown(
             "<div style='height:1px;background:#1a1a2e;margin:2px 0 4px 0;'></div>",
             unsafe_allow_html=True,
         )
-
+ 
     if _bbox_pending_name and _bbox_pending_info is not None:
         _bbox_popup(_bbox_pending_name, _bbox_pending_info, pdf_path or "")
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SUMMARY HELPERS
@@ -1594,7 +1634,7 @@ def _render_ai_assessment_tab(intelligence: dict) -> None:
     judge   = intelligence.get("analysis", {}).get("judge", {})
     signals = intelligence.get("analysis", {}).get("signals", [])
 
-    st.markdown(_section_header("AI Verdict"), unsafe_allow_html=True)
+    st.markdown(_section_header("AI Assessment"), unsafe_allow_html=True)
 
     cards = [
         ("🧠", "Classification Rationale",  judge.get("classification_reasoning", ""),
